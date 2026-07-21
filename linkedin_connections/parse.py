@@ -26,8 +26,18 @@ COL_COMPANY = "Company"
 COL_POSITION = "Position"
 COL_CONNECTED = "Connected On"
 
-# Date formats seen across LinkedIn export versions, tried in order.
-_DATE_FORMATS = ("%d %b %Y", "%d %B %Y", "%m/%d/%y", "%m/%d/%Y", "%Y-%m-%d")
+# English month names -> number, keyed by the first three letters. LinkedIn
+# always exports English month names ("14 May 2026"); we parse them ourselves
+# rather than via strptime %b/%B, which depends on the process LC_TIME locale
+# and would silently fail (returning None for every row) under a non-English
+# locale.
+_MONTHS = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+
+# Numeric date formats are locale-independent, so strptime is safe for these.
+_NUMERIC_DATE_FORMATS = ("%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d")
 
 
 @dataclass(frozen=True)
@@ -56,7 +66,18 @@ def parse_connected_on(value: str) -> Optional[date]:
     value = (value or "").strip()
     if not value:
         return None
-    for fmt in _DATE_FORMATS:
+    # LinkedIn's usual form: "14 May 2026" / "14 September 2026". Parse the month
+    # name locale-independently.
+    parts = value.split()
+    if len(parts) == 3:
+        day, month_name, year = parts
+        month = _MONTHS.get(month_name[:3].lower())
+        if month and day.isdigit() and year.isdigit():
+            try:
+                return date(int(year), month, int(day))
+            except ValueError:
+                return None
+    for fmt in _NUMERIC_DATE_FORMATS:
         try:
             return datetime.strptime(value, fmt).date()
         except ValueError:
@@ -67,11 +88,16 @@ def parse_connected_on(value: str) -> Optional[date]:
 def _find_header_index(lines: List[str]) -> int:
     """Return the index of the real header row (the one naming the columns).
 
-    LinkedIn puts a "Notes:" preamble before it. We anchor on ``First Name``,
-    which has been present in every export version.
+    LinkedIn puts a "Notes:" preamble before it. We anchor on ``First Name``
+    appearing as an actual CSV field (not merely as a substring of some prose
+    line in the preamble), which has been present in every export version.
     """
     for i, line in enumerate(lines):
-        if COL_FIRST in line:
+        try:
+            fields = next(csv.reader([line]))
+        except csv.Error:
+            continue
+        if COL_FIRST in (field.strip() for field in fields):
             return i
     raise ValueError(
         f"Could not find a header row containing {COL_FIRST!r}. "

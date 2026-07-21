@@ -13,31 +13,45 @@ deliberately simple and easy to adjust - see ``SENIORITY_KEYWORDS``.
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from .parse import Connection
 
 # Ordered most-senior first: the first bucket whose keywords match wins.
+# Keywords are matched on WORD BOUNDARIES (not raw substrings), so "cto" does
+# not match inside "director" and "coo" does not match inside "coordinator".
 SENIORITY_KEYWORDS: List[Tuple[str, Tuple[str, ...]]] = [
-    ("executive", ("chief", "ceo", "cfo", "cto", "coo", "cmo", "founder",
+    ("executive", ("chief", "ceo", "cfo", "cto", "coo", "cmo", "cpo", "founder",
                    "president", "partner", "owner")),
-    ("vp", ("vp", "vice president", "svp", "evp", "head of", "head,")),
+    ("vp", ("vp", "vice president", "svp", "evp", "head of")),
     ("director", ("director", "principal")),
     ("manager", ("manager", "lead", "supervisor")),
-    ("senior", ("senior", "sr.", "sr ", "staff")),
+    ("senior", ("senior", "sr", "staff")),
     ("individual", ("engineer", "developer", "analyst", "associate",
                     "specialist", "coordinator", "consultant", "designer")),
 ]
 
 
+def _has_word(text: str, keyword: str) -> bool:
+    """True if ``keyword`` appears in ``text`` on word boundaries."""
+    return re.search(r"\b" + re.escape(keyword) + r"\b", text) is not None
+
+
 def classify_seniority(position: str) -> str:
-    """Bucket a job title into a seniority level, or ``"unknown"``."""
+    """Bucket a job title into a seniority level, or ``"unknown"``.
+
+    Uses word-boundary keyword matching. "Vice President" is treated as VP-level
+    and is checked before the executive bucket's bare "president" could claim it.
+    """
     p = (position or "").lower()
     if not p:
         return "unknown"
+    if _has_word(p, "vice president") or _has_word(p, "vp"):
+        return "vp"
     for level, keywords in SENIORITY_KEYWORDS:
-        if any(k in p for k in keywords):
+        if any(_has_word(p, k) for k in keywords):
             return level
     return "unknown"
 
@@ -77,13 +91,16 @@ def staleness(
     A connection is ``stale`` if it was made more than ``stale_after_years``
     before ``as_of_year``. Undated connections are counted separately.
     """
+    # "More than stale_after_years before as_of_year" means strictly older than
+    # the cutoff year: with as_of=2026, stale_after=4, cutoff=2022 and a 2022
+    # connection (exactly 4 years) is still active, not stale.
     cutoff = as_of_year - stale_after_years
     active = stale = undated = 0
     for c in connections:
         year = c.connected_year
         if year is None:
             undated += 1
-        elif year <= cutoff:
+        elif year < cutoff:
             stale += 1
         else:
             active += 1
